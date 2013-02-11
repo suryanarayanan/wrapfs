@@ -1,0 +1,131 @@
+README
+------
+
+Author: Suryanarayanan Balasubramanian
+email : sbalasubrama@cs.stonybrook.edu
+
+Adding Address space operations and crypto support to WRAPFS - a stackable file system
+--------------------------------------------------------------------------------------
+
+Making the wrapfs with new features:
+------------------------------------
+
+1.     The wrapfs module can be built by firing make command from the top level of kernel source tree.
+       To build with crypto support:
+              
+               make CRYPTO+=-DWRAPFS_CRYPTO
+
+       To build without crypto support:
+              
+               make
+
+2.     There is a user space program called setpassword provided to set and revoke encryption key.
+        To build setpassword program we need to get into wrapfs folder:
+              
+               cd fs/wrapfs
+               make
+
+Note: Since I use openssl libray in userland to generate MD5 hash. I presume that openssl libraries are already installed. Else please run
+       In case of Fedora/CentOs : yum install openssl-devel
+       In case of Ubuntu        : sudo aptitude isntall openssl-devel
+
+How to use the new WRAPFS module:
+---------------------------------
+
+To enable the address space operation -o mmap option should be used during mount.
+
+       To insert the new module
+       ------------------------
+               insmod fs/wrapfs/wrapfs.ko
+
+       To mount under wrapfs
+       ---------------------
+               mount -t wrapfs -o mmap /testfolder /mnt/wrapfs
+
+       Setting a new key:
+       -----------------
+               ./setpassword -s "password" /mnt/wrapfs
+      
+       Revoking a key:
+       ---------------
+               ./setpassword -r /mnt/wrapfs
+              
+       For usage related help:
+       -----------------------
+               ./setpassword -h
+
+
+Pre requisites before testing:
+-----------------------------
+       1. wrapfs code should be compiled with either WRAPFS_CRYPTO switch on/off.
+       2. userland program should be built
+       3. wrapfs module should be inserted
+       4. mount command should be executed with either mmap switch on/off.
+       5. setpassword utility should be run and key should be set.
+
+       If the WRAPFS_CRYPTO is enabled and setpassword is not used to set the key then access to all files inside the mount point will throw -ENOKEY error.
+
+
+Design and Implementation discussion:
+-------------------------------------
+
+       I've followed UNIONFS and ECRYPTFS implementation to implement the address space operations and crypto support respectively. There are four new operations added to enable address space operations.
+
+const struct address_space_operations wrapfs_aops {
+       .readpage        =  wrapfs_readpage(),
+       .writepage      =  wrapfs_writepage(),
+       .write_begin     =  wrapfs_write_begin(),
+       .write_end      =  wrapfs_write_end(),
+};
+
+1. readpage():
+       In this method wrapfs calls the vfs_read to read the lower file to get the page data. Once the page data is copied to upper layer, I decrypt the page using the key set in superblock.
+
+2. writepage():
+       This method writes the upper page to lower file by calling vfs_write(). While writing the data to lower level, I encrypt the lower page using the key set in superblock.
+
+3. write_begin():
+       This method has been inspired from ecryptfs. This method actually prepares the data to be written to the lower file. If the page is not updated we do a vfs_read() to read the lower file and correspondingly update the offset values.
+
+4. write_end():
+       This method has been inspired from ecryptfs. After write_begin() sets up the page to be written, this method writes the data to lower file using vfs_write. I encrypt the data here also to make sure the data that goes into the lower file system is encrypted.
+
+
+Changes to file_operations structure:
+-------------------------------------
+       I created a new file_operations structure to support mmap option.
+       * .read => do_sync_read()  which internally calls our address space operations
+       * .write => do_sync_write() which internally calls our address space operations
+
+Crypto Operations:
+------------------
+       I use aes in counter mode to perform encryption and decryption. This has been chosen to facilitate the implimentation. Because aes in cbc mode requires padding and that breaks one to one correspondance between upper page contents and lower page contents and dealing with padding which crosses page boundaries. In ctr mode padding is not required and the size of encrypted contents corresponds to size of plain text input.
+
+Since I use AES in counter mode CTR_SUPPORT should be enabled in .config file.
+
+       setting key:
+       ------------
+       The userland program setpassword should be used to set the user key in super block of wrapfs mount point.
+       1. The user password should be atleast 6 characters in length.
+       2. I generate an MD5 hash
+       3. Using ioctl system call to pass this key to kernel using ioctl command IOCTL_SET_KEY.
+
+       revoking key:
+       ------------
+       If -r option is specified to user program we pass a key with 0s to signal that user wants to revoke the key. In wrapfs/file.c I've implemented the wrapfs_unlocked_ioctl() to deal with setting/revoking key by toggling 'user_key' to 1 / 0 respectively.
+
+
+Misc Switches:
+--------------
+
+       1. The mmap option in mount command is controlled by 'is_mmap' variable in wrapfs.h source.
+      
+       2. The 'user_key' variable in wrapfs.h signal whether user has set or revoked the key using ioctl.
+
+       3. In the wrapfs_permission() of inode.c I check the user_key is set or unset. If unset return an -ENOKEY to specify no key is set. The only exception is the dentry of the super block itself. Since we need to get a handle to it once ioctl command is issued to set user key.
+
+Other discussions:
+------------------
+LTP tests are run to test the reliability of the wrapfs after new features are added.
+Linux kernel coding style has been followed throught the source code.
+
